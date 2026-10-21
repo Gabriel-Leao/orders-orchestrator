@@ -55,13 +55,13 @@ sequenceDiagram
 
 Camadas, da borda para dentro:
 
-| Camada              | Responsabilidade                                                 |
-| ------------------- | ---------------------------------------------------------------- |
-| Controllers         | HTTP, validação de entrada (DTOs), autenticação                  |
-| Services            | Regras de negócio, idempotência, transições de status            |
-| Processors          | Consumo da fila, retry e DLQ                                     |
-| Clients             | Integração com serviços externos, isolada atrás de uma interface |
-| Entities/Migrations | Persistência e versionamento do schema                           |
+| Camada | Responsabilidade |
+|---|---|
+| Controllers | HTTP, validação de entrada (DTOs), autenticação |
+| Services | Regras de negócio, idempotência, transições de status |
+| Processors | Consumo da fila, retry e DLQ |
+| Clients | Integração com serviços externos, isolada atrás de uma interface |
+| Entities/Migrations | Persistência e versionamento do schema |
 
 ## Stack
 
@@ -115,17 +115,17 @@ docker compose down -v # derruba tudo e apaga os volumes
 
 ## Variáveis de ambiente
 
-| Variável                                                      | Descrição                              | Padrão                                                    |
-| ------------------------------------------------------------- | -------------------------------------- | --------------------------------------------------------- |
-| `PORT`                                                        | Porta da API                           | `3333`                                                    |
-| `API_KEY`                                                     | Chave exigida no header `x-api-key`    | —                                                         |
-| `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PASSWORD` / `DB_NAME` | Conexão com o PostgreSQL               | `localhost` / `5432` / `postgres` / `postgres` / `orders` |
-| `REDIS_HOST` / `REDIS_PORT`                                   | Conexão com o Redis                    | `localhost` / `6379`                                      |
-| `EXCHANGE_API_URL`                                            | URL base da API de câmbio              | `https://api.frankfurter.dev/v1`                          |
-| `TARGET_CURRENCY`                                             | Moeda para a qual o total é convertido | `BRL`                                                     |
-| `EXTERNAL_TIMEOUT_MS`                                         | Timeout da chamada externa             | `5000`                                                    |
-| `ENRICHMENT_MAX_ATTEMPTS`                                     | Tentativas antes de ir para a DLQ      | `5`                                                       |
-| `ENRICHMENT_BACKOFF_MS`                                       | Delay base do backoff exponencial      | `1000`                                                    |
+| Variável | Descrição | Padrão |
+|---|---|---|
+| `PORT` | Porta da API | `3333` |
+| `API_KEY` | Chave exigida no header `x-api-key` | — |
+| `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PASSWORD` / `DB_NAME` | Conexão com o PostgreSQL | `localhost` / `5432` / `postgres` / `postgres` / `orders` |
+| `REDIS_HOST` / `REDIS_PORT` | Conexão com o Redis | `localhost` / `6379` |
+| `EXCHANGE_API_URL` | URL base da API de câmbio | `https://api.frankfurter.dev/v1` |
+| `TARGET_CURRENCY` | Moeda para a qual o total é convertido | `BRL` |
+| `EXTERNAL_TIMEOUT_MS` | Timeout da chamada externa | `5000` |
+| `ENRICHMENT_MAX_ATTEMPTS` | Tentativas antes de ir para a DLQ | `5` |
+| `ENRICHMENT_BACKOFF_MS` | Delay base do backoff exponencial | `1000` |
 
 As variáveis são validadas na inicialização: a aplicação não sobe com configuração inválida.
 
@@ -150,12 +150,18 @@ curl -X POST http://localhost:3333/webhooks/orders \
   }'
 ```
 
-| Resposta           | Quando                                                                     |
-| ------------------ | -------------------------------------------------------------------------- |
-| `202 Accepted`     | Pedido novo, persistido e enfileirado                                      |
-| `200 OK`           | `idempotency_key` já recebida: devolve o pedido existente, sem reprocessar |
-| `400 Bad Request`  | Payload inválido (a resposta lista os campos com erro)                     |
-| `401 Unauthorized` | `x-api-key` ausente ou inválida                                            |
+| Resposta | Quando |
+|---|---|
+| `202 Accepted` | Pedido novo, persistido e enfileirado |
+| `200 OK` | `idempotency_key` já recebida: devolve o pedido existente, sem reprocessar |
+| `400 Bad Request` | Payload inválido (a resposta lista os campos com erro) |
+| `409 Conflict` | `order_id` já recebido com uma `idempotency_key` diferente |
+| `503 Service Unavailable` | Pedido gravado, mas a fila não respondeu a tempo: reenvie a mesma `idempotency_key` |
+| `401 Unauthorized` | `x-api-key` ausente ou inválida |
+
+### `GET /health`
+
+Público (sem API Key). Verifica a conectividade com o banco; devolve `200` ou `503`.
 
 ### `GET /orders`
 
@@ -189,9 +195,9 @@ Contagem de jobs da fila principal e da DLQ.
 
 Com a API no ar:
 
-| URL                               | Conteúdo                      |
-| --------------------------------- | ----------------------------- |
-| `http://localhost:3333/docs`      | Swagger UI interativo         |
+| URL | Conteúdo |
+|---|---|
+| `http://localhost:3333/docs` | Swagger UI interativo |
 | `http://localhost:3333/docs/json` | Especificação OpenAPI em JSON |
 
 Todas as rotas exigem a API Key. No Swagger UI, clique em **Authorize**, informe o valor de `API_KEY` e a chave passa a ser enviada no header `x-api-key` em todas as requisições (a autorização fica salva entre recarregamentos da página).
@@ -212,7 +218,6 @@ Error: Invalid environment variables:
 **Logs.** `nestjs-pino`: saída legível no desenvolvimento e JSON em produção. Cada requisição recebe um `x-correlation-id` (reaproveita o enviado pelo cliente ou gera um novo), devolvido no header da resposta e presente nos logs. O nível é controlado por `LOG_LEVEL`.
 
 **Segurança.**
-
 - Autenticação por API Key no header `x-api-key`.
 - `helmet` aplicado a todas as rotas, com a CSP relaxada apenas em `/docs`, porque o Swagger UI usa scripts inline.
 - `ValidationPipe` global com `whitelist` e `forbidNonWhitelisted`: campos fora do contrato são rejeitados com `400`.
@@ -243,7 +248,19 @@ As transições são centralizadas no service e transições inválidas são rej
 
 **Valores monetários.** O total é calculado e armazenado de forma que evite erro de ponto flutuante (`numeric` no Postgres). Guardam-se também a cotação usada e a data dela, para o resultado ser auditável.
 
-**Persistir antes de enfileirar (trade-off conhecido).** Se o insert der certo e o enqueue falhar, o pedido fica em `RECEIVED` sem job. Para este escopo isso é tratado marcando o erro; em produção a solução seria o padrão **Transactional Outbox** (gravar o evento na mesma transação do pedido e um relay publicar na fila).
+**Unicidade em duas dimensões.** Além da `idempotency_key`, o `order_id` externo também é único. Reenvio com a mesma chave devolve o pedido existente (`200`); o mesmo `order_id` com outra chave é rejeitado com `409`. A constraint violada identifica qual dos casos ocorreu.
+
+**Itens em `jsonb`.** Os itens são um snapshot do payload recebido e nunca são consultados individualmente, então ficam em uma coluna `jsonb` em vez de uma tabela separada. Se houver necessidade de consultas por SKU, vira uma tabela `order_items`.
+
+**Enfileiramento idempotente e autorrecuperável.** O job usa `jobId = id do pedido`, então enfileirar duas vezes não cria dois jobs. O webhook enfileira sempre que o pedido está `RECEIVED` (novo **ou** replay): se o enqueue falhar, o cliente recebe `503`, reenvia a mesma `idempotency_key` e o pedido é enfileirado de novo. O worker, por sua vez, ignora pedidos que já avançaram, então uma reentrega nunca reprocessa.
+
+**Timeout no enqueue.** Com o Redis fora do ar, o cliente do Redis acumula o comando e espera a reconexão. O produtor limita a espera a 3 s para o webhook falhar rápido (`503`) em vez de pendurar a requisição.
+
+**Transições de status atômicas.** A máquina de estados (`order-status.transitions.ts`) define as transições válidas, e cada mudança é um `UPDATE ... WHERE status IN (origens válidas)`. Dois workers concorrentes, ou uma reentrega, não conseguem aplicar uma transição inválida nem sobrescrever um estado final.
+
+**Redis compartilhado.** Todas as chaves usam o prefixo `orders-orchestrator`, o que permite usar um Redis que outros projetos também usam sem colisão de filas.
+
+**Persistir antes de enfileirar (trade-off conhecido).** Se o insert der certo e o enqueue falhar, o pedido fica em `RECEIVED` sem job; o `503` + replay descrito acima recupera esse caso. Em produção, a solução definitiva seria o padrão **Transactional Outbox** (gravar o evento na mesma transação do pedido e um relay publicar na fila).
 
 **Integração externa isolada.** O cliente de câmbio fica atrás de uma interface, com timeout explícito, o que permite trocar de provedor e mockar nos testes sem rede.
 
@@ -290,8 +307,8 @@ Decisão: as entities ficam dentro do módulo dono (`orders/entities`), e `datab
 ## Status
 
 - [x] Scaffold, Docker, configuração validada (Zod), logs (Pino) e Swagger
-- [ ] Entity, migration e `POST /webhooks/orders` com idempotência
-- [ ] Fila e processor com transições de status
+- [x] Entity, migration, guard de API Key e `POST /webhooks/orders` com idempotência (testes unitários incluídos)
+- [x] Enfileiramento no webhook, fila e processor com transições de status
 - [ ] Enriquecimento via API de câmbio
 - [ ] Retry com backoff, DLQ e `FAILED_ENRICHMENT`
 - [ ] `GET /orders`, `GET /orders/:id`, `GET /queue/metrics`
@@ -301,6 +318,7 @@ Decisão: as entities ficam dentro do módulo dono (`orders/entities`), e `datab
 
 - Transactional Outbox para eliminar a janela entre persistir e enfileirar.
 - Validação de assinatura HMAC do payload do webhook.
+- Comparar um hash do payload nos replays: hoje, reenviar a mesma `idempotency_key` com corpo diferente devolve o pedido original sem avisar.
 - Endpoint para reprocessar jobs da DLQ.
 - Rate limiting no webhook.
 - Observabilidade: logs estruturados com correlation id, métricas Prometheus e tracing.
