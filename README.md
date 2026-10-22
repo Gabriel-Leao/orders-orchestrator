@@ -165,29 +165,86 @@ Público (sem API Key). Verifica a conectividade com o banco; devolve `200` ou `
 
 ### `GET /orders`
 
-Lista pedidos com paginação e filtro opcional por status.
+Lista pedidos, do mais recente para o mais antigo, com paginação e filtro opcional por status.
+
+| Parâmetro | Descrição | Padrão |
+|---|---|---|
+| `status` | `RECEIVED`, `PROCESSING`, `ENRICHED` ou `FAILED_ENRICHMENT` | sem filtro |
+| `page` | Página (≥ 1) | `1` |
+| `limit` | Itens por página (1 a 100) | `20` |
 
 ```bash
 curl "http://localhost:3333/orders?status=ENRICHED&page=1&limit=20" -H "x-api-key: change-me"
 ```
 
+```json
+{
+  "data": [
+    {
+      "id": "ab104f7b-f488-4431-ba5f-0cf697beaf38",
+      "order_id": "ext-123",
+      "status": "ENRICHED",
+      "customer": { "email": "user@example.com", "name": "Ana" },
+      "items": [{ "sku": "ABC123", "qty": 2, "unit_price": 59.9 }],
+      "currency": "USD",
+      "total": 119.8,
+      "enrichment": {
+        "target_currency": "BRL",
+        "converted_total": 658.9,
+        "exchange_rate": 5.5,
+        "exchange_rate_date": "2026-10-20",
+        "enriched_at": "2026-10-21T23:34:06.283Z"
+      },
+      "failure_reason": null,
+      "attempts": 1,
+      "created_at": "2026-10-21T23:34:06.262Z",
+      "updated_at": "2026-10-21T23:34:06.284Z"
+    }
+  ],
+  "meta": { "page": 1, "limit": 20, "total": 1, "total_pages": 1 }
+}
+```
+
+Uma página além do fim devolve `200` com `data` vazio. Parâmetros inválidos (status desconhecido, `limit` fora de 1–100, `page` menor que 1 ou parâmetros que não existem) devolvem `400`.
+
 ### `GET /orders/:id`
 
-Detalhes de um pedido, incluindo dados enriquecidos, tentativas e motivo da falha (quando houver).
-
-### `GET /queue/metrics`
-
-Contagem de jobs da fila principal e da DLQ.
+Detalhes de um pedido (mesmo formato dos itens acima): dados de enriquecimento, número de tentativas e motivo da falha. Em um pedido que falhou, `enrichment` é `null` e `failure_reason` explica o motivo:
 
 ```json
 {
-  "queue": "orders",
-  "waiting": 0,
-  "active": 1,
-  "completed": 42,
-  "failed": 0,
-  "delayed": 2,
-  "dlq": { "waiting": 1 }
+  "id": "38fc77f0-e5b9-48c4-a5f1-a5f3ac86f1bc",
+  "order_id": "ext-456",
+  "status": "FAILED_ENRICHMENT",
+  "enrichment": null,
+  "failure_reason": "Exchange API responded with 500",
+  "attempts": 5
+}
+```
+
+| Resposta | Quando |
+|---|---|
+| `200 OK` | Pedido encontrado |
+| `400 Bad Request` | `id` não é um UUID |
+| `404 Not Found` | Pedido inexistente |
+
+### `GET /queue/metrics`
+
+Contagem de jobs da fila principal e da Dead Letter Queue, lida do Redis. Na DLQ, cada job `waiting` é um pedido que falhou de vez. Se o Redis estiver indisponível, responde `503` em até 3 s.
+
+```json
+{
+  "prefix": "orders-orchestrator",
+  "queue": {
+    "name": "orders",
+    "is_paused": false,
+    "counts": { "waiting": 0, "active": 1, "delayed": 2, "completed": 42, "failed": 3 }
+  },
+  "dead_letter_queue": {
+    "name": "orders-dlq",
+    "is_paused": false,
+    "counts": { "waiting": 3, "active": 0, "delayed": 0, "completed": 0, "failed": 0 }
+  }
 }
 ```
 
@@ -223,6 +280,28 @@ Error: Invalid environment variables:
 - `ValidationPipe` global com `whitelist` e `forbidNonWhitelisted`: campos fora do contrato são rejeitados com `400`.
 - Segredos só em variáveis de ambiente; o `.env` não é versionado.
 
+## Enriquecimento, retry e DLQ
+
+O worker consulta a API de câmbio ([Frankfurter](https://frankfurter.dev)) e converte o total do pedido para `TARGET_CURRENCY`, gravando a moeda alvo, o total convertido, a cotação usada e a data dela. Se o pedido já está na moeda alvo, não há chamada externa (cotação 1).
+
+**Classificação dos erros.** Repetir só faz sentido quando a falha pode se resolver sozinha:
+
+| Situação | Classificação | O que acontece |
+|---|---|---|
+| Rede indisponível, timeout, HTTP `5xx`, HTTP `429`, corpo que não é JSON | Transitória | Retry com backoff exponencial |
+| HTTP `4xx` (exceto `429`), moeda sem cotação na resposta | Permanente | Vai direto para a DLQ, sem gastar tentativas |
+| Pedido inexistente | Permanente | Vai direto para a DLQ |
+
+**Retry.** Até `ENRICHMENT_MAX_ATTEMPTS` tentativas, com atraso exponencial a partir de `ENRICHMENT_BACKOFF_MS` (ex.: 1 s, 2 s, 4 s, 8 s). Enquanto isso, o pedido permanece `PROCESSING` e `attempts` mostra quantas vezes o worker tentou.
+
+**DLQ.** Na falha definitiva (erro permanente, tentativas esgotadas, ou job travado), o worker:
+1. registra um job na fila `orders-dlq` com `orderId`, motivo, número de tentativas e data (o `jobId` é o id do pedido, então não duplica);
+2. marca o pedido como `FAILED_ENRICHMENT` e grava o motivo em `failure_reason`.
+
+Os jobs da DLQ ficam aguardando para inspeção ou reprocessamento manual (nenhum worker os consome). Se a DLQ estiver indisponível, o status do pedido continua sendo atualizado, porque é ele que o cliente consulta.
+
+**Idempotência no processamento.** Um job reentregue para um pedido já `ENRICHED` ou `FAILED_ENRICHMENT` é ignorado, e as transições de status são atômicas no banco.
+
 ## Ciclo de vida do pedido
 
 ```mermaid
@@ -248,6 +327,8 @@ As transições são centralizadas no service e transições inválidas são rej
 
 **Valores monetários.** O total é calculado e armazenado de forma que evite erro de ponto flutuante (`numeric` no Postgres). Guardam-se também a cotação usada e a data dela, para o resultado ser auditável.
 
+**Paginação por offset com ordem estável.** A listagem ordena por `created_at DESC` e usa o `id` como desempate, para que `created_at` repetido não faça pedidos aparecerem em duas páginas ou sumirem entre elas. O `limit` é limitado a 100 e a validação dos parâmetros rejeita valores inválidos com `400`.
+
 **Unicidade em duas dimensões.** Além da `idempotency_key`, o `order_id` externo também é único. Reenvio com a mesma chave devolve o pedido existente (`200`); o mesmo `order_id` com outra chave é rejeitado com `409`. A constraint violada identifica qual dos casos ocorreu.
 
 **Itens em `jsonb`.** Os itens são um snapshot do payload recebido e nunca são consultados individualmente, então ficam em uma coluna `jsonb` em vez de uma tabela separada. Se houver necessidade de consultas por SKU, vira uma tabela `order_items`.
@@ -262,7 +343,7 @@ As transições são centralizadas no service e transições inválidas são rej
 
 **Persistir antes de enfileirar (trade-off conhecido).** Se o insert der certo e o enqueue falhar, o pedido fica em `RECEIVED` sem job; o `503` + replay descrito acima recupera esse caso. Em produção, a solução definitiva seria o padrão **Transactional Outbox** (gravar o evento na mesma transação do pedido e um relay publicar na fila).
 
-**Integração externa isolada.** O cliente de câmbio fica atrás de uma interface, com timeout explícito, o que permite trocar de provedor e mockar nos testes sem rede.
+**Integração externa isolada.** O cliente de câmbio implementa a interface `ExchangeRateClient` (injetada por token), com timeout explícito e erros tipados. Trocar de provedor é trocar uma linha no `EnrichmentModule`, e os testes usam um mock, sem rede. A API usada é a v1 da Frankfurter, que está marcada como obsoleta (substituída pela v2) mas segue funcionando; migrar é uma mudança restrita a essa classe.
 
 **Autenticação por API Key.** `ApiKeyGuard` global, comparação em tempo constante (`timingSafeEqual`).
 
@@ -309,15 +390,18 @@ Decisão: as entities ficam dentro do módulo dono (`orders/entities`), e `datab
 - [x] Scaffold, Docker, configuração validada (Zod), logs (Pino) e Swagger
 - [x] Entity, migration, guard de API Key e `POST /webhooks/orders` com idempotência (testes unitários incluídos)
 - [x] Enfileiramento no webhook, fila e processor com transições de status
-- [ ] Enriquecimento via API de câmbio
-- [ ] Retry com backoff, DLQ e `FAILED_ENRICHMENT`
-- [ ] `GET /orders`, `GET /orders/:id`, `GET /queue/metrics`
+- [x] Enriquecimento via API de câmbio (Frankfurter) com conversão do total
+- [x] Retry com backoff exponencial, DLQ e `FAILED_ENRICHMENT` (erros transitórios x permanentes)
+- [x] `GET /orders` (filtro e paginação), `GET /orders/:id`, `GET /queue/metrics`
 - [ ] Testes unitários e de integração
 
 ## Melhorias futuras
 
 - Transactional Outbox para eliminar a janela entre persistir e enfileirar.
 - Validação de assinatura HMAC do payload do webhook.
+- Índice composto `(status, created_at)` e paginação por cursor em `GET /orders`, caso o volume de pedidos cresça (offset fica mais lento nas páginas finais).
+- Reconciliador para pedidos que ficarem presos em `PROCESSING` (por exemplo, se o banco cair justamente ao gravar `FAILED_ENRICHMENT`).
+- Circuit breaker no cliente de câmbio e migração para a API v2 da Frankfurter.
 - Comparar um hash do payload nos replays: hoje, reenviar a mesma `idempotency_key` com corpo diferente devolve o pedido original sem avisar.
 - Endpoint para reprocessar jobs da DLQ.
 - Rate limiting no webhook.

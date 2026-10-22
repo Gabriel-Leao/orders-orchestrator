@@ -2,6 +2,7 @@ import {
   ConflictException,
   Injectable,
   Logger,
+  NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -18,6 +19,19 @@ import { allowedSources } from './order-status.transitions';
 import { OrdersProducer } from './orders.producer';
 
 const PG_UNIQUE_VIOLATION = '23505';
+
+export interface ListOrdersParams {
+  status?: OrderStatus;
+  page: number;
+  limit: number;
+}
+
+export interface PaginatedOrders {
+  items: Order[];
+  total: number;
+  page: number;
+  limit: number;
+}
 
 export interface ReceiveOrderResult {
   order: Order;
@@ -41,6 +55,26 @@ export class OrdersService {
 
   findById(id: string): Promise<Order | null> {
     return this.orders.findOne({ where: { id } });
+  }
+
+  async getById(id: string): Promise<Order> {
+    const order = await this.findById(id);
+    if (!order) throw new NotFoundException(`Order ${id} not found`);
+    return order;
+  }
+
+  async list({
+    status,
+    page,
+    limit,
+  }: ListOrdersParams): Promise<PaginatedOrders> {
+    const [items, total] = await this.orders.findAndCount({
+      where: status ? { status } : {},
+      order: { createdAt: 'DESC', id: 'DESC' },
+      skip: (page - 1) * limit,
+      take: limit,
+    });
+    return { items, total, page, limit };
   }
 
   async transition(
@@ -134,6 +168,7 @@ export class OrdersService {
     if (driverError?.code !== PG_UNIQUE_VIOLATION) throw error;
 
     if (driverError.constraint === ORDER_IDEMPOTENCY_CONSTRAINT) {
+      // Outra requisição com a mesma chave venceu a corrida: devolve o pedido dela.
       const winner = await this.findByIdempotencyKey(dto.idempotency_key);
       if (winner) {
         this.logger.log(
