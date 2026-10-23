@@ -1,18 +1,21 @@
+name: orders-orchestrator
+
 services:
   postgres:
     image: postgres:16-alpine
     container_name: orders-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ${DB_USER:-orders}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-orders}
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
       POSTGRES_DB: ${DB_NAME:-orders}
     ports:
       - '${DB_PORT:-5432}:5432'
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U ${DB_USER:-orders} -d ${DB_NAME:-orders}']
+      test:
+        ['CMD-SHELL', 'pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-orders}']
       interval: 5s
       timeout: 3s
       retries: 10
@@ -43,16 +46,32 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    env_file:
-      - .env
     environment:
+      NODE_ENV: production
+      PORT: 3333
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      API_KEY: ${API_KEY:-change-me}
       DB_HOST: postgres
       DB_PORT: 5432
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:-postgres}
+      DB_NAME: ${DB_NAME:-orders}
       REDIS_HOST: redis
       REDIS_PORT: 6379
+      EXCHANGE_API_URL: ${EXCHANGE_API_URL:-https://api.frankfurter.dev/v1}
+      TARGET_CURRENCY: ${TARGET_CURRENCY:-BRL}
+      EXTERNAL_TIMEOUT_MS: ${EXTERNAL_TIMEOUT_MS:-5000}
+      ENRICHMENT_MAX_ATTEMPTS: ${ENRICHMENT_MAX_ATTEMPTS:-5}
+      ENRICHMENT_BACKOFF_MS: ${ENRICHMENT_BACKOFF_MS:-1000}
     ports:
-      - '${PORT:-3000}:3000'
+      - '${PORT:-3333}:3333'
     command: sh -c "npm run migration:run:prod && node dist/main"
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://localhost:3333/health']
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 20s
 
 volumes:
   postgres_data:

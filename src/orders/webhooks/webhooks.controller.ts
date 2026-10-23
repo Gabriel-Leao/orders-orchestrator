@@ -12,6 +12,7 @@ import {
   ApiConflictResponse,
   ApiOkResponse,
   ApiOperation,
+  ApiServiceUnavailableResponse,
   ApiTags,
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
@@ -46,6 +47,10 @@ export class WebhooksController {
   @ApiUnauthorizedResponse({ description: 'x-api-key ausente ou inválida' })
   @ApiConflictResponse({
     description: 'order_id já recebido com outra idempotency_key',
+  })
+  @ApiServiceUnavailableResponse({
+    description:
+      'Pedido gravado, mas a fila não respondeu a tempo: reenvie a mesma idempotency_key',
   })
   async receive(
     @Body() dto: CreateOrderWebhookDto,

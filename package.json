@@ -1,7 +1,7 @@
 {
   "name": "orders-orchestrator",
   "version": "0.0.1",
-  "description": "",
+  "description": "Orquestrador de pedidos: webhook idempotente, processamento assíncrono com BullMQ, enriquecimento via API de câmbio, retry com backoff e DLQ.",
   "author": "",
   "private": true,
   "license": "UNLICENSED",
@@ -75,5 +75,8 @@
     "tsconfig-paths": "^4.2.0",
     "typescript": "^5.7.3",
     "typescript-eslint": "^8.20.0"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }

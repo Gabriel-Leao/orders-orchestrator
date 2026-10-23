@@ -11,7 +11,8 @@ RUN npm run build
 # ---------- runtime ----------
 FROM node:22-alpine AS runtime
 WORKDIR /app
-ENV NODE_ENV=production
+ENV NODE_ENV=production \
+    PORT=3333
 
 COPY package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force
@@ -19,5 +20,6 @@ RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=build /app/dist ./dist
 
 USER node
-EXPOSE 3000
+EXPOSE 3333
+
 CMD ["node", "dist/main"]

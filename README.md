@@ -81,11 +81,22 @@ Camadas, da borda para dentro:
 ### Tudo com Docker (recomendado para avaliação)
 
 ```bash
-cp .env.example .env
 docker compose up --build
 ```
 
-A API sobe em `http://localhost:3333`, as migrations rodam automaticamente na inicialização e o Swagger fica em `http://localhost:3333/docs`.
+Não é preciso configurar nada: todas as variáveis têm valor padrão. O compose sobe PostgreSQL, Redis e a API, e as migrations rodam automaticamente na inicialização. Acompanhe com `docker compose ps` (o `app` fica `healthy` em alguns segundos) ou `docker compose logs -f app`.
+
+| O quê | Onde |
+|---|---|
+| API | `http://localhost:3333` |
+| Swagger (documentação interativa) | `http://localhost:3333/docs` |
+| API Key padrão | `change-me` (header `x-api-key`) |
+
+Para mudar qualquer valor, copie `.env.example` para `.env` (o compose o lê automaticamente) ou passe a variável no comando. Se as portas `5432`/`6379` já estiverem em uso na sua máquina, use outras só no host (dentro da rede do compose nada muda):
+
+```bash
+DB_PORT=5433 REDIS_PORT=6380 docker compose up --build
+```
 
 ### Desenvolvimento local
 
@@ -108,18 +119,62 @@ npm run test           # testes unitários (rápidos, sem I/O)
 npm run test:e2e       # testes de integração (requer Postgres e Redis no ar, veja "Testes")
 npm run test:all       # unitários + integração
 npm run test:cov       # cobertura (unitários + integração)
+npm run lint           # ESLint (src e test)
+npm run typecheck:test # checagem de tipos dos testes
 npm run migration:generate -- src/database/migrations/NomeDaMigration
 npm run migration:run
 npm run migration:revert
 npm run migration:show
+docker compose ps      # estado dos serviços (app deve ficar healthy)
+docker compose logs -f app
 docker compose down -v # derruba tudo e apaga os volumes
 ```
+
+### Primeiros passos
+
+Com a API no ar, envie um pedido e acompanhe o processamento:
+
+```bash
+# 1. Envia um pedido (202 Accepted)
+curl -X POST http://localhost:3333/webhooks/orders \
+  -H "Content-Type: application/json" -H "x-api-key: change-me" \
+  -d '{
+    "order_id": "ext-123",
+    "customer": { "email": "user@example.com", "name": "Ana" },
+    "items": [{ "sku": "ABC123", "qty": 2, "unit_price": 59.9 }],
+    "currency": "USD",
+    "idempotency_key": "3f6c1c1e-8a4b-4a52-9d3e-0f9d2b1a7c10"
+  }'
+
+# 2. Alguns segundos depois: status ENRICHED, com o total convertido para BRL
+curl "http://localhost:3333/orders" -H "x-api-key: change-me"
+
+# 3. Reenviar o mesmo comando do passo 1 devolve 200 com o mesmo pedido (idempotência)
+
+# 4. Estado da fila e da DLQ
+curl http://localhost:3333/queue/metrics -H "x-api-key: change-me"
+```
+
+O enriquecimento consulta a API pública da Frankfurter, então precisa de acesso à internet. Sem ela, o pedido passa por retries com backoff e termina em `FAILED_ENRICHMENT` (com o motivo em `failure_reason` e um job na `orders-dlq`), que é o comportamento esperado para esse cenário.
+
+### Solução de problemas
+
+| Sintoma | O que fazer |
+|---|---|
+| `port is already allocated` ao subir o compose | Use portas alternativas no host: `DB_PORT=5433 REDIS_PORT=6380 docker compose up --build` |
+| Quero recomeçar do zero | `docker compose down -v` (apaga também os volumes do banco e do Redis) |
+| Ver o que a API está fazendo | `docker compose logs -f app` (logs em JSON, com `x-correlation-id` por requisição) |
+| `401 Unauthorized` | Falta o header `x-api-key` (padrão `change-me`) ou ele não confere com `API_KEY` |
+| Pedidos terminando em `FAILED_ENRICHMENT` | Veja `failure_reason` em `GET /orders/:id`. Se for "unreachable" ou "timed out", a API de câmbio está inacessível; ajuste `EXCHANGE_API_URL` se necessário |
+| Os testes de integração abortam falando em "worker" | Há uma API rodando (`npm run start:dev`) consumindo a mesma fila: pare-a antes de rodar `npm run test:e2e` |
 
 ## Variáveis de ambiente
 
 | Variável | Descrição | Padrão |
 |---|---|---|
-| `PORT` | Porta da API | `3333` |
+| `NODE_ENV` | `development` (logs legíveis), `production` (logs em JSON) ou `test` | `development` |
+| `PORT` | Porta da API (no compose, é a porta publicada no host) | `3333` |
+| `LOG_LEVEL` | `fatal`, `error`, `warn`, `info`, `debug`, `trace` ou `silent` | `info` (`debug` em desenvolvimento) |
 | `API_KEY` | Chave exigida no header `x-api-key` | — |
 | `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PASSWORD` / `DB_NAME` | Conexão com o PostgreSQL | `localhost` / `5432` / `postgres` / `postgres` / `orders` |
 | `REDIS_HOST` / `REDIS_PORT` | Conexão com o Redis | `localhost` / `6379` |
@@ -129,7 +184,9 @@ docker compose down -v # derruba tudo e apaga os volumes
 | `ENRICHMENT_MAX_ATTEMPTS` | Tentativas antes de ir para a DLQ | `5` |
 | `ENRICHMENT_BACKOFF_MS` | Delay base do backoff exponencial | `1000` |
 
-As variáveis são validadas na inicialização: a aplicação não sobe com configuração inválida.
+As variáveis são validadas na inicialização: a aplicação não sobe com configuração inválida e a mensagem de erro lista todas as variáveis com problema.
+
+No `docker compose`, o serviço `app` já recebe `DB_HOST=postgres`, `REDIS_HOST=redis` e as portas internas; as demais variáveis vêm do `.env` (se existir) ou dos valores padrão acima. Os valores padrão do compose coincidem com os do `.env.example`.
 
 ## Endpoints
 
@@ -371,8 +428,8 @@ Os testes usam um banco próprio (`orders_test`, criado e migrado automaticament
 # Postgres e Redis do compose em portas alternativas (não colidem com os seus)
 DB_PORT=5433 REDIS_PORT=6380 docker compose up -d postgres redis
 
-# Credenciais iguais às do container (padrão do compose: orders/orders)
-TEST_DB_PORT=5433 TEST_REDIS_PORT=6380 TEST_DB_USER=orders TEST_DB_PASSWORD=orders npm run test:e2e
+# Credenciais padrão do compose: postgres/postgres (as mesmas que os testes assumem)
+TEST_DB_PORT=5433 TEST_REDIS_PORT=6380 npm run test:e2e
 ```
 
 Variáveis disponíveis: `TEST_DB_HOST`, `TEST_DB_PORT`, `TEST_DB_USER`, `TEST_DB_PASSWORD`, `TEST_DB_NAME`, `TEST_REDIS_HOST`, `TEST_REDIS_PORT` (padrões: `localhost`, `5432`, `postgres`, `postgres`, `orders_test`, `localhost`, `6379`).
@@ -392,7 +449,11 @@ src/
 │   ├── database.config.ts      # TypeORM (Postgres)
 │   ├── queue.config.ts         # BullMQ (Redis), retry e backoff padrão
 │   └── swagger.config.ts       # OpenAPI / Swagger UI
-├── common/                     # guards, filters, interceptors
+├── common/
+│   ├── decorators/             # @Public()
+│   ├── guards/                 # ApiKeyGuard (global)
+│   └── utils/                  # withTimeout (falha rápido quando o Redis não responde)
+├── health/                     # GET /health (público)
 ├── database/
 │   ├── data-source.ts          # usado pelo CLI de migrations
 │   └── migrations/
