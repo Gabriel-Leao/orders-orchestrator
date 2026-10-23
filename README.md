@@ -4,19 +4,33 @@ API em **NestJS** que recebe pedidos via webhook, valida, garante idempotência,
 
 ## Sumário
 
-- [Arquitetura](#arquitetura)
-- [Stack](#stack)
-- [Como rodar](#como-rodar)
-- [Variáveis de ambiente](#variáveis-de-ambiente)
-- [Endpoints](#endpoints)
-- [Documentação da API (Swagger)](#documentação-da-api-swagger)
-- [Configuração, logs e segurança](#configuração-logs-e-segurança)
-- [Ciclo de vida do pedido](#ciclo-de-vida-do-pedido)
-- [Decisões técnicas](#decisões-técnicas)
-- [Testes](#testes)
-- [Estrutura do projeto](#estrutura-do-projeto)
-- [Status](#status)
-- [Melhorias futuras](#melhorias-futuras)
+- [Orquestrador de Pedidos](#orquestrador-de-pedidos)
+  - [Sumário](#sumário)
+  - [Arquitetura](#arquitetura)
+  - [Stack](#stack)
+  - [Como rodar](#como-rodar)
+    - [Tudo com Docker (recomendado para avaliação)](#tudo-com-docker-recomendado-para-avaliação)
+    - [Desenvolvimento local](#desenvolvimento-local)
+    - [Comandos úteis](#comandos-úteis)
+    - [Primeiros passos](#primeiros-passos)
+    - [Solução de problemas](#solução-de-problemas)
+  - [Variáveis de ambiente](#variáveis-de-ambiente)
+  - [Endpoints](#endpoints)
+    - [`POST /webhooks/orders`](#post-webhooksorders)
+    - [`GET /health`](#get-health)
+    - [`GET /orders`](#get-orders)
+    - [`GET /orders/:id`](#get-ordersid)
+    - [`GET /queue/metrics`](#get-queuemetrics)
+  - [Documentação da API (Swagger)](#documentação-da-api-swagger)
+  - [Configuração, logs e segurança](#configuração-logs-e-segurança)
+  - [Enriquecimento, retry e DLQ](#enriquecimento-retry-e-dlq)
+  - [Ciclo de vida do pedido](#ciclo-de-vida-do-pedido)
+  - [Decisões técnicas](#decisões-técnicas)
+  - [Testes](#testes)
+    - [Como rodar os testes de integração](#como-rodar-os-testes-de-integração)
+  - [Estrutura do projeto](#estrutura-do-projeto)
+  - [Status](#status)
+  - [Melhorias futuras](#melhorias-futuras)
 
 ## Arquitetura
 
@@ -190,7 +204,7 @@ No `docker compose`, o serviço `app` já recebe `DB_HOST=postgres`, `REDIS_HOST
 
 ## Endpoints
 
-Todos exigem o header `x-api-key: <API_KEY>`.
+Todos exigem o header `x-api-key: <API_KEY>`, exceto `GET /health` (público) e a documentação em `/docs`.
 
 ### `POST /webhooks/orders`
 
@@ -316,9 +330,9 @@ Com a API no ar:
 | `http://localhost:3333/docs` | Swagger UI interativo |
 | `http://localhost:3333/docs/json` | Especificação OpenAPI em JSON |
 
-Todas as rotas exigem a API Key. No Swagger UI, clique em **Authorize**, informe o valor de `API_KEY` e a chave passa a ser enviada no header `x-api-key` em todas as requisições (a autorização fica salva entre recarregamentos da página).
+A página `/docs` é pública, mas as rotas da API (exceto `/health`) exigem a API Key. No Swagger UI, clique em **Authorize**, informe o valor de `API_KEY` e a chave passa a ser enviada no header `x-api-key` em todas as requisições (a autorização fica salva entre recarregamentos da página).
 
-Os schemas dos DTOs são gerados automaticamente pelo plugin do `@nestjs/swagger` (configurado no `nest-cli.json`), a partir dos tipos TypeScript, dos decorators do `class-validator` e dos comentários de documentação, então não há `@ApiProperty` repetido em cada campo. Apenas respostas e códigos de status são anotados nos controllers.
+O plugin do `@nestjs/swagger` está habilitado no `nest-cli.json` (com `introspectComments`) e infere os schemas a partir dos tipos TypeScript e dos decorators do `class-validator`. Os DTOs de entrada ainda usam `@ApiProperty` para declarar exemplos e descrições de forma explícita (por exemplo, o formato da `idempotency_key`). Nos controllers, as respostas e os códigos de status são anotados com os decorators do Swagger.
 
 ## Configuração, logs e segurança
 
@@ -458,13 +472,15 @@ src/
 │   ├── data-source.ts          # usado pelo CLI de migrations
 │   └── migrations/
 ├── orders/                     # módulo de pedidos (produtor da fila)
+│   ├── dto/                    # DTOs de entrada (webhook, filtros) e de resposta
 │   ├── entities/               # entity Order, junto do módulo dono
 │   ├── enums/                  # OrderStatus
-│   ├── webhooks/               # POST /webhooks/orders + DTOs
-│   └── ...                     # controller, service
+│   ├── webhooks/               # controller de POST /webhooks/orders
+│   ├── order-status.transitions.ts  # máquina de estados (transições válidas)
+│   └── ...                     # controller, service, producer
 ├── enrichment/                 # módulo consumidor da fila
-│   ├── clients/                # integração com a API de câmbio
-│   └── ...                     # processor, service
+│   ├── clients/                # integração com a API de câmbio (interface + Frankfurter)
+│   └── ...                     # processor, service, dead-letter, erros tipados
 └── queue/                      # filas (orders, orders-dlq) e métricas
 test/
 ├── jest.config.js              # configuração do Jest (projetos unit e e2e)
