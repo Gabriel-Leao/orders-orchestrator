@@ -104,8 +104,10 @@ Pré-requisito: Node.js 22+ e Docker.
 ### Comandos úteis
 
 ```bash
-npm run test           # testes unitários
-npm run test:e2e       # testes de integração (requer Postgres e Redis no ar)
+npm run test           # testes unitários (rápidos, sem I/O)
+npm run test:e2e       # testes de integração (requer Postgres e Redis no ar, veja "Testes")
+npm run test:all       # unitários + integração
+npm run test:cov       # cobertura (unitários + integração)
 npm run migration:generate -- src/database/migrations/NomeDaMigration
 npm run migration:run
 npm run migration:revert
@@ -329,7 +331,7 @@ As transições são centralizadas no service e transições inválidas são rej
 
 **Paginação por offset com ordem estável.** A listagem ordena por `created_at DESC` e usa o `id` como desempate, para que `created_at` repetido não faça pedidos aparecerem em duas páginas ou sumirem entre elas. O `limit` é limitado a 100 e a validação dos parâmetros rejeita valores inválidos com `400`.
 
-**Unicidade em duas dimensões.** Além da `idempotency_key`, o `order_id` externo também é único. Reenvio com a mesma chave devolve o pedido existente (`200`); o mesmo `order_id` com outra chave é rejeitado com `409`. A constraint violada identifica qual dos casos ocorreu.
+**Unicidade em duas dimensões.** Além da `idempotency_key`, o `order_id` externo também é único. Reenvio com a mesma chave devolve o pedido existente (`200`); o mesmo `order_id` com outra chave é rejeitado com `409`. A constraint violada identifica qual dos casos ocorreu. Numa corrida entre requisições idênticas o Postgres pode citar a constraint de `order_id` em vez da de `idempotency_key`; por isso, antes de responder `409`, o service confere se a chave já pertence a um pedido (nesse caso é replay, `200`).
 
 **Itens em `jsonb`.** Os itens são um snapshot do payload recebido e nunca são consultados individualmente, então ficam em uma coluna `jsonb` em vez de uma tabela separada. Se houver necessidade de consultas por SKU, vira uma tabela `order_items`.
 
@@ -351,15 +353,38 @@ As transições são centralizadas no service e transições inválidas são rej
 
 ## Testes
 
-- **Unitários:** idempotência, transições de status, processor com o client externo mockado.
-- **Integração/E2E:** sobem a aplicação com Postgres e Redis reais, enviam o webhook e verificam `RECEIVED → PROCESSING → ENRICHED`. Um segundo cenário força falha no client externo e verifica os retries, o envio à DLQ e o status `FAILED_ENRICHMENT`.
-- A API externa é sempre mockada, então os testes não dependem de internet. O delay do backoff é configurável por env para os testes não ficarem lentos.
+Tudo fica em `test/`, com a configuração do Jest em `test/jest.config.js` (dois projetos: `unit` e `e2e`).
+
+- **Unitários** (`test/unit/`, espelham a estrutura de `src/`): idempotência e condições de corrida do `OrdersService`, máquina de estados (tabela completa de transições), DTOs (validação do webhook e dos filtros), classificação de erros do client Frankfurter (transitório x permanente), decisão de DLQ do processor, conversão em centavos, guard de API Key, validação de env e timeouts. Nenhum deles usa rede, banco ou Redis.
+- **Integração** (`test/e2e/`): sobem a aplicação inteira (mesmo `configureApp` do `main.ts`) com **Postgres e Redis reais**. O provider `EXCHANGE_RATE_CLIENT` é substituído por um client fake controlável, então não há dependência de internet. Cobrem:
+  - o fluxo da fila: `RECEIVED → PROCESSING → ENRICHED`, o estado intermediário `PROCESSING`, retry com backoff, `FAILED_ENRICHMENT` + job na `orders-dlq`, replay sem reprocessar;
+  - idempotência sob concorrência (várias requisições simultâneas com a mesma chave);
+  - `GET /orders` (paginação sem repetir nem perder pedidos, ordenação estável, filtros e validações), `GET /orders/:id` e `GET /queue/metrics`;
+  - o client real da Frankfurter contra um servidor HTTP local (URL montada, 4xx, 5xx, timeout, corpo inválido).
+- O backoff e o número de tentativas são pequenos nos testes (`ENRICHMENT_BACKOFF_MS=100`, `ENRICHMENT_MAX_ATTEMPTS=3`), e a espera usa polling com timeout, nunca sleep fixo.
+
+### Como rodar os testes de integração
+
+Os testes usam um banco próprio (`orders_test`, criado e migrado automaticamente) e nunca tocam o banco de desenvolvimento: o nome é obrigado a terminar em `_test`. Basta ter um Postgres e um Redis acessíveis.
+
+```bash
+# Postgres e Redis do compose em portas alternativas (não colidem com os seus)
+DB_PORT=5433 REDIS_PORT=6380 docker compose up -d postgres redis
+
+# Credenciais iguais às do container (padrão do compose: orders/orders)
+TEST_DB_PORT=5433 TEST_REDIS_PORT=6380 TEST_DB_USER=orders TEST_DB_PASSWORD=orders npm run test:e2e
+```
+
+Variáveis disponíveis: `TEST_DB_HOST`, `TEST_DB_PORT`, `TEST_DB_USER`, `TEST_DB_PASSWORD`, `TEST_DB_NAME`, `TEST_REDIS_HOST`, `TEST_REDIS_PORT` (padrões: `localhost`, `5432`, `postgres`, `postgres`, `orders_test`, `localhost`, `6379`).
+
+Cuidados com Redis compartilhado: as filas usam o prefixo fixo `orders-orchestrator`, e os testes apagam **somente** chaves com esse prefixo (nunca `FLUSHALL`). Se já existir um worker na fila (por exemplo, a API rodando com `npm run start:dev`), o setup aborta com uma mensagem pedindo para pará-la, porque ela consumiria os jobs dos testes.
 
 ## Estrutura do projeto
 
 ```
 src/
 ├── main.ts
+├── app.setup.ts                # configuração HTTP compartilhada com os testes (helmet, pipes, Swagger)
 ├── app.module.ts
 ├── config/
 │   ├── env.validation.ts       # schema Zod das variáveis de ambiente
@@ -380,7 +405,12 @@ src/
 │   ├── clients/                # integração com a API de câmbio
 │   └── ...                     # processor, service
 └── queue/                      # filas (orders, orders-dlq) e métricas
-test/                           # testes de integração
+test/
+├── jest.config.js              # configuração do Jest (projetos unit e e2e)
+├── tsconfig.json               # tsconfig dos testes
+├── unit/                       # testes unitários (espelham src/)
+├── e2e/                        # testes de integração (Postgres e Redis reais)
+└── support/                    # app de teste, client fake, helpers de polling e builders
 ```
 
 Decisão: as entities ficam dentro do módulo dono (`orders/entities`), e `database/` guarda só a infraestrutura (data source e migrations). Assim cada módulo carrega o que lhe pertence e `database/` não vira um depósito de entities de domínio.
@@ -393,7 +423,7 @@ Decisão: as entities ficam dentro do módulo dono (`orders/entities`), e `datab
 - [x] Enriquecimento via API de câmbio (Frankfurter) com conversão do total
 - [x] Retry com backoff exponencial, DLQ e `FAILED_ENRICHMENT` (erros transitórios x permanentes)
 - [x] `GET /orders` (filtro e paginação), `GET /orders/:id`, `GET /queue/metrics`
-- [ ] Testes unitários e de integração
+- [x] Testes unitários e de integração (fluxo da fila, retry, DLQ, idempotência concorrente e endpoints de consulta)
 
 ## Melhorias futuras
 

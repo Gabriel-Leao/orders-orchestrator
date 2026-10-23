@@ -14,8 +14,8 @@ export const envSchema = z.object({
   PORT: portSchema.default(3333),
 
   LOG_LEVEL: z
-    .enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace'])
-    .default('info'),
+    .enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent'])
+    .optional(),
 
   API_KEY: nonEmptyStringSchema,
 
@@ -33,8 +33,12 @@ export const envSchema = z.object({
     .url()
     .refine(
       (value) => {
-        const protocol = new URL(value).protocol;
-        return protocol === 'http:' || protocol === 'https:';
+        try {
+          const protocol = new URL(value).protocol;
+          return protocol === 'http:' || protocol === 'https:';
+        } catch {
+          return false;
+        }
       },
       { message: 'Must be an HTTP or HTTPS URL' },
     ),

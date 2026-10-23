@@ -2,16 +2,20 @@ import { Module } from '@nestjs/common';
 import { LoggerModule } from 'nestjs-pino';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { Request, Response } from 'express';
+import { Env } from './env.validation';
+
 @Module({
   imports: [
     LoggerModule.forRootAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
-      useFactory: (config: ConfigService) => {
+      useFactory: (config: ConfigService<Env, true>) => {
         const isDev = config.get('NODE_ENV') === 'development';
         return {
           pinoHttp: {
-            level: isDev ? 'debug' : 'info',
+            level:
+              config.get('LOG_LEVEL', { infer: true }) ??
+              (isDev ? 'debug' : 'info'),
             transport: isDev
               ? {
                   target: 'pino-pretty',

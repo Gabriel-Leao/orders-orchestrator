@@ -167,8 +167,11 @@ export class OrdersService {
       { code?: string; constraint?: string } | undefined;
     if (driverError?.code !== PG_UNIQUE_VIOLATION) throw error;
 
-    if (driverError.constraint === ORDER_IDEMPOTENCY_CONSTRAINT) {
-      // Outra requisição com a mesma chave venceu a corrida: devolve o pedido dela.
+    const isIdempotencyOrExternalId =
+      driverError.constraint === ORDER_IDEMPOTENCY_CONSTRAINT ||
+      driverError.constraint === ORDER_EXTERNAL_ID_CONSTRAINT;
+
+    if (isIdempotencyOrExternalId) {
       const winner = await this.findByIdempotencyKey(dto.idempotency_key);
       if (winner) {
         this.logger.log(
